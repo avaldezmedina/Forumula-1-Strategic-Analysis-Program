@@ -1,0 +1,21 @@
+# Environment variables - never commit secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+
+# Pytest
+.pytest_cache/
+.coverage
+
+# Alembic
+alembic/versions/*.pyc
+
+# OS
+.DS_Store
