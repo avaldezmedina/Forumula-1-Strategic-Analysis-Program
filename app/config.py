@@ -1,4 +1,4 @@
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -6,8 +6,7 @@ class Settings(BaseSettings):
     redis_url: str
     openf1_base_url: str = "https://api.openf1.org/v1"
 
-    class Config:
-        env_file = ".env"
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
 # Single shared instance imported everywhere

@@ -1,6 +1,6 @@
 from sqlalchemy import (
     Column, Integer, String, Numeric, Boolean,
-    ForeignKey, ForeignKeyConstraint, Text, BigInteger
+    ForeignKey, ForeignKeyConstraint, Text, BigInteger, UniqueConstraint
 )
 from sqlalchemy.dialects.postgresql import TIMESTAMP
 from sqlalchemy.orm import DeclarativeBase, relationship
@@ -46,6 +46,10 @@ class Driver(Base):
     first_name = Column(String(255))
     last_name = Column(String(255))
     team_name = Column(String(255))
+
+    __table_args__ = (
+        UniqueConstraint("year", "driver_number", name="uq_drivers_year_driver_number"),
+    )
 
 
 class Lap(Base):
