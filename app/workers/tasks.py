@@ -1,27 +1,71 @@
-from app.workers.celery_app import celery_app
+from __future__ import annotations
+import httpx
+from app.celery_app import celery_app
 from app.db.base import SessionLocal
+from app.ingestion.client import OpenF1Client, OpenF1ClientError
+from app.ingestion.ingest import ingest_full_session, ingest_meeting, ingest_session
 
+def _is_retryable_openf1_error(exc: OpenF1ClientError) -> bool:
+    """
+    Decide whether an OpenF1ClientError is transient and should be retried.
+
+    Current logic relies on the wrapped cause from client._get().
+    A future improvement would be to store status_code directly on
+    OpenF1ClientError instead of inspecting __cause__.
+    """
+    cause = exc.__cause__
+
+    if isinstance(cause, httpx.RequestError):
+        return True
+
+    if isinstance(cause, httpx.HTTPStatusError):
+        status_code = cause.response.status_code
+        return status_code in {429, 500, 502, 503, 504}
+
+    if isinstance(cause, ValueError):
+        return True
+
+    return False
 
 @celery_app.task(bind=True, max_retries=3)
-def ingest_session_task(self, session_key: int):
+def ingest_session_task(self, session_key: int) -> None:
     """
-    Celery task that triggers full ingestion for a race session.
+    Ingest one full session starting from session_key.
 
-    TODO: Implement this task. It should:
-    1. Open a database session using SessionLocal()
-    2. Call ingest_full_session from app.ingestion.ingest
-    3. Close the session when done
-
-    The retry decorator means Celery will automatically retry
-    this task up to 3 times if it raises an exception.
-
-    Think about: what kinds of failures should trigger a retry?
-    (network errors, API timeouts) vs what failures should NOT
-    retry? (bad data that will always fail)
-
-    Look up: self.retry() and how to raise a retry with backoff.
+    Flow:
+    1. Fetch session by session_key
+    2. Fetch parent meeting by meeting_key
+    3. Persist meeting
+    4. Persist session
+    5. Ingest all child data and commit once inside ingest_full_session
     """
-    raise NotImplementedError
+    client = OpenF1Client()
+    db = SessionLocal()
+
+    try:
+        raw_session = client.get_session(session_key)
+        raw_meeting = client.get_meeting(raw_session["meeting_key"])
+
+        ingest_meeting(db, raw_meeting)
+        ingest_session(db, raw_session)
+
+        ingest_full_session(db, client, raw_session)
+
+    except OpenF1ClientError as exc:
+        db.rollback()
+
+        if _is_retryable_openf1_error(exc):
+            countdown = min(60, 2 ** self.request.retries)
+            raise self.retry(exc=exc, countdown=countdown)
+
+        raise
+
+    except Exception:
+        db.rollback()
+        raise
+
+    finally:
+        db.close()
 
 
 @celery_app.task(bind=True, max_retries=3)
