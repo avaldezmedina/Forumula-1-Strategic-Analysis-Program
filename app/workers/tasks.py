@@ -1,6 +1,6 @@
 from __future__ import annotations
 import httpx
-from app.celery_app import celery_app
+from app.workers.celery_app import celery_app
 from app.db.base import SessionLocal
 from app.ingestion.client import OpenF1Client, OpenF1ClientError
 from app.ingestion.ingest import ingest_full_session, ingest_meeting, ingest_session
