@@ -1,8 +1,8 @@
 from __future__ import annotations
-from typing import Any
-from sqlalchemy import select
+
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
+
 from app.db import models
 from app.ingestion.client import OpenF1Client, OpenF1ClientError
 
@@ -90,11 +90,17 @@ def ingest_drivers(db: Session, client: OpenF1Client, session_key: int, year: in
         db.execute(stmt)
 
 
-def ingest_laps(db: Session, client: OpenF1Client, session_key: int, driver_number: int, year: int) -> None:
+def ingest_laps(
+    db: Session,
+    client: OpenF1Client,
+    session_key: int,
+    driver_number: int,
+    year: int,
+) -> None:
     """
     Fetch and persist all laps for a driver in a session.
 
-    Laps are idempotent on (session_key, driver_number, lap_number).
+    Laps are idempotent on (session_key, year, driver_number, lap_number).
     """
     laps = client.get_laps(session_key, driver_number)
 
@@ -122,6 +128,8 @@ def ingest_laps(db: Session, client: OpenF1Client, session_key: int, driver_numb
 def ingest_stints(db: Session, client: OpenF1Client, session_key: int, year: int) -> None:
     """
     Fetch and persist all stints for a session.
+
+    Stints are idempotent on (session_key, driver_number, stint_number).
     """
     stints = client.get_stints(session_key)
 
@@ -178,39 +186,42 @@ def ingest_race_control(db: Session, client: OpenF1Client, session_key: int, yea
     """
     Fetch and persist all race control messages for a session.
 
-    race_control has a surrogate BIGSERIAL PK and no natural unique constraint,
-    so we do application-level deduplication before insert.
+    Idempotency:
+    - race_control uses a unique index over the event identity columns.
+    - NULLS NOT DISTINCT in the migration makes nullable identity fields
+      participate correctly in deduplication.
     """
     messages = client.get_race_control(session_key)
 
     for raw_message in messages:
-        occurred_at = raw_message.get("date")
-
-        existing = db.execute(
-            select(models.RaceControl.id).where(
-                models.RaceControl.session_key == raw_message["session_key"],
-                models.RaceControl.occurred_at == occurred_at,
-                models.RaceControl.message == raw_message.get("message"),
-                models.RaceControl.driver_number == raw_message.get("driver_number"),
-                models.RaceControl.lap_number == raw_message.get("lap_number"),
-                models.RaceControl.category == raw_message.get("category"),
+        stmt = (
+            insert(models.RaceControl)
+            .values(
+                session_key=raw_message["session_key"],
+                year=year,
+                driver_number=raw_message.get("driver_number"),
+                category=raw_message.get("category"),
+                message=raw_message["message"],
+                flag=raw_message.get("flag"),
+                scope=raw_message.get("scope"),
+                sector=raw_message.get("sector"),
+                lap_number=raw_message.get("lap_number"),
+                occurred_at=raw_message.get("date"),
             )
-        ).first()
-
-        if existing:
-            continue
-
-        stmt = insert(models.RaceControl).values(
-            session_key=raw_message["session_key"],
-            year=year,
-            driver_number=raw_message.get("driver_number"),
-            category=raw_message.get("category"),
-            message=raw_message["message"],
-            flag=raw_message.get("flag"),
-            scope=raw_message.get("scope"),
-            sector=raw_message.get("sector"),
-            lap_number=raw_message.get("lap_number"),
-            occurred_at=occurred_at,
+            .on_conflict_do_nothing(
+                index_elements=[
+                    "session_key",
+                    "year",
+                    "driver_number",
+                    "category",
+                    "message",
+                    "flag",
+                    "scope",
+                    "sector",
+                    "lap_number",
+                    "occurred_at",
+                ]
+            )
         )
 
         db.execute(stmt)

@@ -1,6 +1,6 @@
 from sqlalchemy import (
     Column, Integer, String, Numeric, Boolean,
-    ForeignKey, ForeignKeyConstraint, Text, BigInteger, UniqueConstraint
+    ForeignKey, ForeignKeyConstraint, Text, BigInteger, UniqueConstraint, Index
 )
 from sqlalchemy.dialects.postgresql import TIMESTAMP
 from sqlalchemy.orm import DeclarativeBase, relationship
@@ -135,6 +135,21 @@ class RaceControl(Base):
         ForeignKeyConstraint(
             ["year", "driver_number"],
             ["drivers.year", "drivers.driver_number"]
+        ),
+        Index(
+            "uq_race_control_event",
+            "session_key",
+            "year",
+            "driver_number",
+            "category",
+            "message",
+            "flag",
+            "scope",
+            "sector",
+            "lap_number",
+            "occurred_at",
+            unique=True,
+            postgresql_nulls_not_distinct=True,
         ),
     )
 
