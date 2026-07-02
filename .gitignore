@@ -19,3 +19,7 @@ alembic/versions/*.pyc
 
 # OS
 .DS_Store
+
+# Replay bundles (generated at runtime)
+data/replays/*
+!data/replays/.gitkeep

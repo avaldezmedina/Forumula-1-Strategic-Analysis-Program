@@ -134,6 +134,13 @@ def ingest_stints(db: Session, client: OpenF1Client, session_key: int, year: int
     stints = client.get_stints(session_key)
 
     for raw_stint in stints:
+        lap_start = raw_stint.get("lap_start")
+        lap_end = raw_stint.get("lap_end")
+        compound = raw_stint.get("compound")
+        if lap_start is None or lap_end is None or not compound:
+            # OpenF1 occasionally returns incomplete stint rows; skip them.
+            continue
+
         stmt = (
             insert(models.Stint)
             .values(
@@ -141,9 +148,9 @@ def ingest_stints(db: Session, client: OpenF1Client, session_key: int, year: int
                 driver_number=raw_stint["driver_number"],
                 year=year,
                 stint_number=raw_stint["stint_number"],
-                compound=raw_stint["compound"],
-                lap_start=raw_stint["lap_start"],
-                lap_end=raw_stint["lap_end"],
+                compound=compound,
+                lap_start=lap_start,
+                lap_end=lap_end,
                 tyre_age_at_start=raw_stint.get("tyre_age_at_start"),
             )
             .on_conflict_do_nothing(

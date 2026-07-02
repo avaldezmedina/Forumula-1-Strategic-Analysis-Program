@@ -11,6 +11,7 @@ from app.ingestion.ingest import ingest_full_session
 from app.strategy.pace import compute_all_stint_summaries
 from app.strategy.tire_life import compute_tire_life_estimate
 from app.strategy.pit_window import compute_pit_window_scores_for_session
+from app.replay.builder import build_session_replay
 
 
 def _is_retryable_openf1_error(exc: OpenF1ClientError) -> bool:
@@ -209,6 +210,19 @@ def _compute_pit_windows(db, session_key: int) -> dict:
     }
 
 
+def _build_replay(db, session_key: int, force: bool = False) -> dict:
+    """
+    Build precomputed replay bundle for one session.
+    """
+    result = build_session_replay(db, session_key, force=force)
+    return {
+        "status": result.get("status", "success"),
+        "stage": "replay",
+        "session_key": session_key,
+        **{k: v for k, v in result.items() if k not in {"status", "session_key"}},
+    }
+
+
 @celery_app.task(bind=True, max_retries=3)
 def ingest_session_task(self, session_key: int) -> dict:
     """
@@ -325,6 +339,43 @@ def compute_pit_window_task(self, session_key: int) -> dict:
 
 
 @celery_app.task(bind=True, max_retries=3)
+def build_session_replay_task(self, session_key: int, force: bool = False) -> dict:
+    """
+    Build precomputed replay bundle for one session.
+
+    Retries transient OpenF1/API and database operational failures.
+    """
+    db = SessionLocal()
+
+    try:
+        result = _build_replay(db, session_key, force=force)
+        db.commit()
+        return result
+
+    except OpenF1ClientError as exc:
+        db.rollback()
+
+        if _is_retryable_openf1_error(exc):
+            countdown = min(60, 2 ** self.request.retries)
+            raise self.retry(exc=exc, countdown=countdown)
+
+        raise
+
+    except OperationalError as exc:
+        db.rollback()
+
+        countdown = min(60, 2 ** self.request.retries)
+        raise self.retry(exc=exc, countdown=countdown)
+
+    except Exception:
+        db.rollback()
+        raise
+
+    finally:
+        db.close()
+
+
+@celery_app.task(bind=True, max_retries=3)
 def run_full_session_pipeline_task(self, session_key: int) -> dict:
     """
     Run the full historical analytics pipeline for one session.
@@ -335,6 +386,7 @@ def run_full_session_pipeline_task(self, session_key: int) -> dict:
     3. compute stint pace summaries
     4. compute circuit-level tire-life estimates
     5. compute pit-window scores
+    6. build replay bundle
 
     Retries only:
     - transient OpenF1/API failures during ingestion
@@ -357,6 +409,18 @@ def run_full_session_pipeline_task(self, session_key: int) -> dict:
         pit_window_result = _compute_pit_windows(db, session_key)
         db.commit()
 
+        # Replay build fetches large volumes of location data from OpenF1 and
+        # can be slow.  Run it as a separate queued task so that a 429 during
+        # location fetching doesn't cause the entire analytics pipeline to retry
+        # from scratch.
+        build_session_replay_task.delay(session_key)
+        replay_result = {
+            "status": "queued",
+            "stage": "replay",
+            "session_key": session_key,
+            "message": "Replay build queued as a background task.",
+        }
+
         return {
             "status": "success",
             "stage": "full_pipeline",
@@ -367,6 +431,7 @@ def run_full_session_pipeline_task(self, session_key: int) -> dict:
                 "stint_pace": stint_result,
                 "tire_life": tire_life_result,
                 "pit_window": pit_window_result,
+                "replay": replay_result,
             },
         }
 

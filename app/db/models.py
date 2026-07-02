@@ -1,6 +1,6 @@
 from sqlalchemy import (
     Column, Integer, String, Numeric, Boolean,
-    ForeignKey, ForeignKeyConstraint, Text, BigInteger, UniqueConstraint, Index
+    ForeignKey, ForeignKeyConstraint, Text, BigInteger, UniqueConstraint, Index, JSON
 )
 from sqlalchemy.dialects.postgresql import TIMESTAMP
 from sqlalchemy.orm import DeclarativeBase, relationship
@@ -152,6 +152,28 @@ class RaceControl(Base):
             postgresql_nulls_not_distinct=True,
         ),
     )
+
+
+class SessionReplay(Base):
+    __tablename__ = "session_replays"
+
+    session_key = Column(Integer, ForeignKey("sessions.session_key"), primary_key=True)
+    status = Column(String(20), nullable=False, default="pending")
+    start_time = Column(TIMESTAMP(timezone=True))
+    end_time = Column(TIMESTAMP(timezone=True))
+    frame_interval_ms = Column(Integer, nullable=False, default=250)
+    bundle_path = Column(String(512))
+    built_at = Column(TIMESTAMP(timezone=True))
+    error_message = Column(Text)
+
+
+class CircuitTrack(Base):
+    __tablename__ = "circuit_tracks"
+
+    circuit_key = Column(Integer, primary_key=True)
+    polyline = Column(JSON, nullable=False)
+    source_session_key = Column(Integer, ForeignKey("sessions.session_key"))
+    computed_at = Column(TIMESTAMP(timezone=True), nullable=False)
 
 
 # =============================================================================
