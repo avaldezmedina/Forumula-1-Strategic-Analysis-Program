@@ -1,22 +1,51 @@
 # Formula 1 Strategic Analysis Program
 
-A full-stack platform for **historical F1 race strategy analysis** and **broadcast-style race replay**. The backend ingests telemetry and timing data from the [OpenF1 API](https://openf1.org), computes stint pace, tire degradation, and pit-window recommendations, and precomputes frame-by-frame replay bundles for an interactive track map viewer.
+A full-stack platform that answers two questions every F1 strategist cares about:
+
+1. **When should a driver pit or extend their stint?** — analytics from historical lap, stint, and tyre-life data.
+2. **What did the race actually look like?** — a broadcast-style replay with cars on a real circuit map, flags, and per-driver strategy guidance synced to playback time.
+
+Built with **FastAPI**, **Celery**, **PostgreSQL**, **React**, and **TypeScript**, sourcing live historical data from the [OpenF1 API](https://openf1.org).
 
 ---
 
-## Features
+## In plain English
 
-### Strategy analytics
-- Ingests sessions, laps, stints, pit stops, and race control messages from OpenF1
-- Computes stint pace summaries and tire-life estimates per circuit/compound
-- Pit-window scoring with strategy recommendations via REST API
+Imagine you're watching an F1 race on TV — track map, dots for each car, leaderboard, yellow flags — but it's a **past race** you can rewind, speed up, and scrub through. Click any driver and a panel appears telling you whether they should **pit now**, **consider pitting**, **extend the stint**, or **keep monitoring** tyre wear, based on precomputed analytics for that exact lap.
 
-### Live race replay (historical)
-- SVG track map with team-colored car markers moving in real time (from historical data)
-- Playback at **0.5×, 1×, 2×, 5×, 10×** with smooth interpolation between frames
-- Live leaderboard with position and gap to car ahead
-- Race control overlays: sector yellow flags, safety car / VSC banners, incident toasts
-- Precomputed, chunked replay bundles for efficient streaming to the browser
+That's what this app does. The backend pulls real F1 data, runs strategy models offline, and pre-builds a "filmstrip" of car positions. The browser plays it back smoothly while overlaying pit recommendations as you move through the race.
+
+---
+
+## What you can do in the UI
+
+| Feature | How |
+|---------|-----|
+| **Browse races** | Open `http://localhost:5173` — pick a session with replay status `ready` |
+| **Watch the replay** | Circuit map, moving cars, leaderboard, play/pause, scrubber |
+| **Change speed** | 0.5×, 1×, 2×, 5×, 10× |
+| **See flags & incidents** | Sector yellows on the map; SC/VSC banners; incident toasts |
+| **Track a driver** | Click a car on the map or a row in the leaderboard |
+| **Pit / extend guidance** | Strategy panel shows tyre life %, recommendation, and stint history — updates as you scrub through the race |
+
+**Example race URLs** (after pipeline completes):
+
+- Bahrain 2024: `http://localhost:5173/replay-view/9472`
+- Suzuka 2024: `http://localhost:5173/replay-view/9496`
+- Monaco 2024: `http://localhost:5173/replay-view/9523`
+
+---
+
+## Technical highlights (for recruiters)
+
+- **Event-driven data pipeline** — Celery workers ingest OpenF1 telemetry, compute stint pace / tyre degradation / pit-window scores, then build replay bundles asynchronously.
+- **Precomputed playback architecture** — Race "simulation" is offline frame generation (250 ms intervals, chunked JSON); the client interpolates with `requestAnimationFrame` for smooth 60 fps rendering without streaming raw telemetry.
+- **Canonical circuit geometry** — 24 F1 circuits ship as static polylines (`data/tracks/`) from MultiViewer, aligned to OpenF1 `(x, y)` coordinates — not derived from noisy telemetry at runtime.
+- **O(log n) frame lookups** — `_DriverTimeline` pre-indexes per-driver location arrays; bisect-based interpolation avoids GC pressure in the hot frame-build loop.
+- **Strategy + replay integration** — `GET /strategy/driver-panel/{session}/{driver}` returns all per-lap scores; the UI maps playback time → estimated lap → live recommendation.
+- **Race control state machine** — Frontend flag overlay handles `YELLOW`, `DOUBLE_YELLOW`, `CLEAR`, `GREEN`, `SC`, `VSC`, `RED` with sector-scoped Map deduplication (OpenF1 uses `CLEAR` for sector lifts, not `GREEN`).
+
+**Stack:** FastAPI · SQLAlchemy · Alembic · Celery · Redis · PostgreSQL 15 · React 18 · TypeScript · Vite · SVG
 
 ---
 
@@ -25,193 +54,216 @@ A full-stack platform for **historical F1 race strategy analysis** and **broadca
 ```
 ┌─────────────┐     ┌──────────────┐     ┌─────────────────┐
 │  OpenF1 API │────▶│ Celery Worker│────▶│ PostgreSQL      │
-└─────────────┘     │  (ingestion, │     │ (raw + derived) │
-                    │   analytics, │     └─────────────────┘
-                    │   replay)    │
+└─────────────┘     │  ingest      │     │ laps, stints,   │
+                    │  analytics   │     │ pit scores, RC  │
+                    │  replay build│     └─────────────────┘
                     └──────┬───────┘
                            │
-                    ┌──────▼───────┐     ┌─────────────────┐
-                    │ Replay       │────▶│ data/replays/   │
-                    │ Bundle Builder│     │ {session_key}/  │
-                    └──────┬───────┘     └─────────────────┘
-                           │
-┌─────────────┐     ┌──────▼───────┐     ┌─────────────────┐
-│ React SPA   │◀───▶│ FastAPI      │     │ data/tracks/    │
-│ (Vite)      │     │ /replay/*    │     │ {circuit_key}.json
-└─────────────┘     └──────────────┘     └─────────────────┘
+              ┌────────────┼────────────┐
+              ▼            ▼            ▼
+     data/replays/   data/tracks/   strategy tables
+     {session}/      {circuit}.json  (pit_window_scores)
+              │
+┌─────────────┐     ┌──────▼───────┐
+│ React SPA   │◀───▶│ FastAPI      │
+│ localhost:  │     │ /replay/*    │
+│ 5173        │     │ /strategy/*  │
+└─────────────┘     └──────────────┘
 ```
-
-| Layer | Stack |
-|-------|-------|
-| API | FastAPI, SQLAlchemy, Alembic |
-| Workers | Celery, Redis |
-| Database | PostgreSQL 15 |
-| Frontend | React 18, TypeScript, Vite |
-| Data source | OpenF1 API v1 |
 
 ---
 
-## Race replay — technical design
+## UI components
 
-The replay system is **not** a real-time simulation. It is an **offline compile + client playback** pipeline: the worker fetches telemetry once, resamples it into uniform time steps, writes JSON bundles to disk, and the browser plays them back like a scrubbable video.
+| Component | File | Purpose |
+|-----------|------|---------|
+| **SessionPicker** | `SessionPicker.tsx` | Lists sessions and replay build status |
+| **ReplayViewer** | `ReplayViewer.tsx` | Main page: orchestrates playback, selection, layout |
+| **TrackMap** | `TrackMap.tsx` | SVG circuit, sector underlays, clickable car dots, flag overlays |
+| **Leaderboard** | `Leaderboard.tsx` | Live positions and gaps; click to select driver |
+| **DriverStrategyPanel** | `DriverStrategyPanel.tsx` | Tyre life bar, PIT/EXTEND recommendation, stint table |
+| **Timeline** | `Timeline.tsx` | Play/pause, scrubber, elapsed time |
+| **SpeedControl** | `SpeedControl.tsx` | 0.5× – 10× playback presets |
+| **EventOverlay** | `EventOverlay.tsx` | SC/VSC banners and incident toasts |
 
-### 1. Canonical circuit geometry (`data/tracks/`)
+**Hooks:**
 
-Track outlines are **not** inferred from noisy multi-lap telemetry at runtime. Each circuit has a pre-authored polyline keyed by OpenF1 `circuit_key`:
+- `useFrameLoader` — lazy-loads 60-second frame chunks ahead of the playhead
+- `usePlaybackEngine` — RAF loop; linear interpolation of car `(x, y)` between 250 ms frames
 
-```
-data/tracks/63.json   # Bahrain (Sakhir)
-data/tracks/46.json   # Suzuka
-data/tracks/22.json   # Monaco (Monte Carlo)
-… (24 circuits on the 2024–2026 calendar)
-```
+---
 
-**Source:** [MultiViewer](https://api.multiviewer.app) circuit info, linked from each meeting's `circuit_info_url` in OpenF1. This is the same coordinate system F1 uses for car positioning.
+## Driver strategy panel (pit tracker)
 
-Each track file contains:
-- `bounds` — raw `(min_x, max_x, min_y, max_y)` for normalizing telemetry
-- `points` — ordered polyline normalized to `[0, 1] × [0, 1]`
-- `sectors` — three arc-length segments for yellow-flag highlighting
+When you select a driver, the panel loads all precomputed strategy data in one API call and updates as playback time advances.
 
-Regenerate all tracks:
+**Backend:** `GET /strategy/driver-panel/{session_key}/{driver_number}`
+
+Returns:
+- All stint pace summaries (compound, lap range, avg pace, deg/lap)
+- All per-lap pit-window scores (`PIT_NOW`, `CONSIDER_PIT`, `EXTEND`, `MONITOR`)
+- Estimated lap duration (median clean lap time) for mapping replay time → lap number
+
+**Frontend logic:**
+1. `estimatedLap = currentMs / estimatedLapDurationMs`
+2. Find the nearest scored lap ≤ estimated lap
+3. Display tyre life ratio bar, recommendation badge, and stint history
+
+**Requirements:** Run the **full pipeline** (`POST /sessions/pipeline/{key}`) so analytics tables are populated — replay-only rebuild is not enough for strategy data.
+
+**Recommendation colors:**
+
+| Badge | Meaning |
+|-------|---------|
+| `EXTEND` | Tyre life healthy — stay out |
+| `MONITOR` | Watch degradation |
+| `CONSIDER PIT` | Approaching pit window |
+| `PIT NOW` | Significant deg or window closing |
+
+---
+
+## Race replay (historical simulation)
+
+This is **not** a physics engine. It is an **offline compile + client playback** pipeline:
+
+1. Worker fetches all drivers' location data from OpenF1 (bulk, 5-minute windows)
+2. Loads static circuit polyline from `data/tracks/{circuit_key}.json`
+3. Resamples telemetry to 250 ms frames with position, gap, and normalized `(x, y)`
+4. Writes chunked JSON bundles to `data/replays/{session_key}/`
+5. Browser plays frames like a scrubbable video with interpolation
+
+### Circuit maps (`data/tracks/`)
+
+Track outlines come from [MultiViewer](https://api.multiviewer.app) circuit geometry — the same coordinate system OpenF1 uses. **24 circuits** are included (2024–2026 calendar). Cars use OpenF1 **`(x, y)`** for the map plane (not `x, z`).
+
+Regenerate tracks:
 
 ```bash
 python3 scripts/generate_static_tracks.py
 ```
 
-### 2. Coordinate system correction
+### Flag overlays
 
-OpenF1 `location` samples expose three axes: `x`, `y`, `z`. For track maps, the horizontal plane is **`(x, y)`** — not `(x, z)`. The `z` axis has a narrow range (~160 units vs ~8000 for `x`/`y`) and does not represent position on the circuit. Car positions and the static track polyline both normalize against the same `bounds` using independent per-axis scaling so cars align with the outline.
+Race control messages are normalized to a timeline (`events.json`). The UI applies:
 
-### 3. Replay bundle build (`app/replay/builder.py`)
-
-Triggered by Celery after analytics complete (`build_session_replay_task`), or standalone via `POST /sessions/replay/{session_key}`.
-
-**Pipeline steps:**
-
-1. **Bulk location fetch** — all drivers per 5-minute time window (one API call per window, not per driver) to stay within OpenF1 rate limits
-2. **Load static track** — `load_static_track(circuit_key)` from `data/tracks/{circuit_key}.json`
-3. **Position & interval timelines** — race position and gap-to-ahead from OpenF1
-4. **Frame resampling** — every 250 ms from session start to last telemetry sample (+ 30 s padding)
-5. **Per-driver indexed timelines** (`_DriverTimeline`) — pre-built timestamp arrays with O(log n) `bisect` lookups; avoids rebuilding lists inside the hot frame loop
-6. **Chunked JSON output** — 60-second frame chunks for lazy loading
-
-**Bundle layout:**
-
-```
-data/replays/{session_key}/
-├── metadata.json    # drivers, duration, chunk index
-├── track.json       # polyline + sectors
-├── events.json      # normalized race control timeline
-└── frames/
-    ├── 000.json     # ~60 s of frames at 250 ms intervals
-    ├── 001.json
-    └── …
-```
-
-### 4. Race control events (`app/replay/events.py`)
-
-`RaceControl` rows from the database are normalized into a flat timeline with `t_ms` offsets from session start. Flag types (`YELLOW`, `DOUBLE_YELLOW`, `RED`, `SC`, `VSC`, `GREEN`) drive sector highlighting and full-track overlays in the UI.
-
-### 5. Frontend playback (`frontend/`)
-
-| Component | Role |
-|-----------|------|
-| `useFrameLoader` | Lazy-loads 60 s frame chunks ahead of the playhead |
-| `usePlaybackEngine` | `requestAnimationFrame` loop; interpolates car `(x, y)` between bracketing frames |
-| `TrackMap` | SVG circuit outline, sector underlays, team-colored car dots |
-| `EventOverlay` | Flag banners and incident toasts |
-| `Leaderboard` | Position + interval from interpolated frame state |
-| `Timeline` | Play/pause, scrubber, elapsed time |
-| `SpeedControl` | 0.5× – 10× presets |
-
-The SVG uses a fixed square `viewBox` (`0 0 1 1` with padding) because both axes are independently normalized to `[0, 1]`.
+- **Sector yellow / double yellow** — highlighted sector on the map
+- **CLEAR / GREEN** — lifts sector or track-wide conditions (OpenF1 uses `CLEAR` for sector clears)
+- **SC / VSC** — amber border + banner
+- **RED** — red tint overlay
+- **Incidents** — 8-second toast notifications
 
 ---
 
-## Quick start
+## Getting started
 
 ### Prerequisites
 
-- Docker & Docker Compose
+- [Docker](https://docs.docker.com/get-docker/) and Docker Compose
 - Git
 
-### 1. Clone and configure
+### Step 1 — Clone and configure
 
 ```bash
 git clone https://github.com/avaldezmedina/Forumula-1-Strategic-Analysis-Program.git
-cd Forumula-1-Strategic-Analysis-Program   # or your local directory name
+cd Forumula-1-Strategic-Analysis-Program
 
 cp .env.example .env
-# Edit .env if you want non-default credentials
 ```
 
-### 2. Start services
+Default credentials in `.env.example` work for local development.
+
+### Step 2 — Start all services
 
 ```bash
 docker compose up --build -d
 ```
 
-This starts:
-- **PostgreSQL** on `localhost:5432`
-- **Redis** on `localhost:6379`
-- **API** on `http://localhost:8000`
-- **Celery worker** (ingestion, analytics, replay builds)
-- **Frontend dev server** on `http://localhost:5173`
-
-### 3. Run database migrations
+Wait ~15 seconds, then run migrations:
 
 ```bash
 docker compose exec api alembic upgrade head
 ```
 
-### 4. Ingest and build a race session
+| Service | URL |
+|---------|-----|
+| **Frontend (UI)** | http://localhost:5173 |
+| **API** | http://localhost:8000 |
+| **API docs (Swagger)** | http://localhost:8000/docs |
 
-Use a **Race** session key from OpenF1 (not Qualifying or Practice):
+Verify health:
 
 ```bash
-# Full pipeline: ingest → analytics → replay bundle
+curl http://localhost:8000/health
+```
+
+### Step 3 — Build a race session
+
+Use a **Race** session key (not Qualifying or Practice):
+
+```bash
 curl -X POST http://localhost:8000/sessions/pipeline/9472
 ```
 
-Poll worker logs:
+This runs: **ingest → analytics → replay bundle**. Takes **5–15+ minutes** (OpenF1 rate limits).
+
+Watch progress:
 
 ```bash
 docker compose logs -f worker
 ```
 
-Check replay status:
+Check when done:
 
 ```bash
 curl http://localhost:8000/replay/9472/status
 ```
 
-When `"status": "ready"`, open the viewer:
+Wait for `"status": "ready"`.
+
+### Step 4 — Open the viewer and test
 
 ```bash
 open http://localhost:5173/replay-view/9472
 ```
 
-Or browse all sessions at `http://localhost:5173/`.
+**Try this:**
 
-### 5. Replay-only rebuild (skip re-ingestion)
+1. Press play — cars move around the Bahrain circuit
+2. Change speed to 2× or 5×
+3. Scrub to ~4:00 — brief double-yellow in sector 2, then clears
+4. Click a car (e.g. Verstappen #1) — strategy panel appears below leaderboard
+5. Scrub through the race — recommendation and tyre bar update per lap
+
+### Fresh reset (wipe database)
 
 ```bash
-docker compose restart worker
+docker compose down -v
+docker compose up --build -d
+sleep 15
+docker compose exec api alembic upgrade head
+curl -X POST http://localhost:8000/sessions/pipeline/9472
+```
+
+### Replay-only rebuild (after code changes to replay/frontend)
+
+```bash
+docker compose restart worker frontend
 curl -X POST "http://localhost:8000/sessions/replay/9472?force=true"
 ```
+
+Hard-refresh the browser: `Cmd + Shift + R` (Mac) or `Ctrl + Shift + R` (Windows/Linux).
 
 ---
 
 ## Example session keys (2024 Race)
 
-| Grand Prix | `session_key` | `circuit_key` |
-|------------|---------------|---------------|
-| Bahrain | 9472 | 63 |
-| Japanese GP (Suzuka) | 9496 | 46 |
-| Monaco | 9523 | 22 |
+| Grand Prix | `session_key` | `circuit_key` | Direct link |
+|------------|---------------|---------------|-------------|
+| Bahrain | 9472 | 63 | `/replay-view/9472` |
+| Japanese GP (Suzuka) | 9496 | 46 | `/replay-view/9496` |
+| Monaco | 9523 | 22 | `/replay-view/9523` |
 
-Find more:
+Find more sessions:
 
 ```bash
 curl "https://api.openf1.org/v1/sessions?year=2024&session_type=Race"
@@ -225,7 +277,7 @@ curl "https://api.openf1.org/v1/sessions?year=2024&session_type=Race"
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/sessions/` | List ingested sessions with replay status |
+| `GET` | `/sessions/` | List sessions with replay status |
 | `POST` | `/sessions/pipeline/{session_key}` | Full ingest + analytics + replay |
 | `POST` | `/sessions/replay/{session_key}?force=true` | Replay bundle only |
 | `GET` | `/sessions/ingest/status/{task_id}` | Celery task status |
@@ -244,9 +296,11 @@ curl "https://api.openf1.org/v1/sessions?year=2024&session_type=Race"
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/strategy/recommendation?session_key=…&driver_number=…&lap_number=…` | Pit window recommendation |
+| `GET` | `/strategy/recommendation?session_key=&driver_number=&lap_number=` | Single-lap recommendation |
+| `GET` | `/strategy/driver-panel/{session_key}/{driver_number}` | All stints + scores for replay UI |
+| `GET` | `/strategy/stint-summary/{session_key}/{driver_number}` | Stint pace summaries |
 
-Interactive API docs: `http://localhost:8000/docs`
+Interactive docs: **http://localhost:8000/docs**
 
 ---
 
@@ -254,28 +308,39 @@ Interactive API docs: `http://localhost:8000/docs`
 
 ```
 app/
-├── api/routes/          # FastAPI routers (sessions, replay, strategy)
-├── db/                  # SQLAlchemy models + Alembic migrations
-├── ingestion/           # OpenF1 client + ingest pipeline
+├── api/routes/           # sessions, replay, strategy endpoints
+├── db/                   # SQLAlchemy models + Alembic migrations
+├── ingestion/            # OpenF1 client (rate limiting, bulk location fetch)
 ├── replay/
-│   ├── builder.py       # Replay bundle orchestration + frame generation
-│   ├── static_tracks.py # Load canonical circuit polylines
-│   ├── track.py         # Telemetry fallback (lap extraction, RDP)
-│   └── events.py        # Race control normalization
-├── strategy/            # Pace, tire life, pit window scoring
-└── workers/             # Celery tasks
+│   ├── builder.py        # Frame generation, bundle writer, _DriverTimeline
+│   ├── static_tracks.py  # Load canonical circuit polylines
+│   ├── track.py          # Telemetry fallback for circuits without static data
+│   └── events.py         # Race control → replay event timeline
+├── strategy/             # Pace, tyre life, pit-window scoring
+└── workers/              # Celery tasks (pipeline, replay build)
 
-frontend/
-├── src/components/      # TrackMap, Timeline, Leaderboard, EventOverlay, …
-├── src/hooks/           # usePlaybackEngine, useFrameLoader
-└── src/pages/           # ReplayViewer, SessionPicker
+frontend/src/
+├── components/
+│   ├── TrackMap.tsx           # SVG map + cars + flags
+│   ├── Leaderboard.tsx        # Positions; driver selection
+│   ├── DriverStrategyPanel.tsx # Pit/extend tracker per driver
+│   ├── EventOverlay.tsx       # Flag banners, incident toasts
+│   ├── Timeline.tsx           # Scrubber + play controls
+│   └── SpeedControl.tsx       # Playback speed presets
+├── hooks/
+│   ├── usePlaybackEngine.ts   # RAF interpolation loop
+│   └── useFrameLoader.ts      # Lazy chunk loading
+├── pages/
+│   ├── ReplayViewer.tsx       # Main replay + strategy layout
+│   └── SessionPicker.tsx      # Session list
+└── utils/events.ts            # Flag state machine (YELLOW/CLEAR/GREEN/SC)
 
 data/
-├── tracks/              # Static circuit polylines ({circuit_key}.json)
-└── replays/             # Generated replay bundles (gitignored)
+├── tracks/               # Static circuit polylines (24 circuits, committed)
+└── replays/              # Generated bundles per session (gitignored)
 
 scripts/
-└── generate_static_tracks.py   # Fetch + build all circuit JSON files
+└── generate_static_tracks.py
 ```
 
 ---
@@ -288,20 +353,23 @@ scripts/
 python3 -m pytest tests/ -q
 ```
 
-### Tear down and reset database
+### Troubleshooting
 
-```bash
-docker compose down -v
-docker compose up --build -d
-docker compose exec api alembic upgrade head
-```
+| Problem | Solution |
+|---------|----------|
+| Frontend can't reach API | Ensure `docker compose ps` shows `api` and `frontend` running |
+| Replay stuck / `failed` | Check `docker compose logs -f worker`; retry pipeline or replay curl |
+| Strategy panel empty | Run full pipeline, not replay-only |
+| Yellow flag stuck on map | Hard-refresh browser; ensure latest `events.ts` (handles `CLEAR`) |
+| Stale code in worker | `docker compose restart worker` |
 
 ### Known limitations
 
-- Replay build time depends on OpenF1 API rate limits (HTTP 429); the worker retries with exponential backoff
-- OpenF1 location data is sampled at ~3–4 Hz; playback interpolates between samples
-- Madrid (`circuit_key=153`) has no MultiViewer geometry yet; falls back to telemetry-derived outline
-- Generated replay bundles (`data/replays/`) are not committed; rebuild per session after clone
+- Replay build time depends on OpenF1 API rate limits (HTTP 429); worker retries with exponential backoff
+- Location data ~3–4 Hz; playback interpolates between samples
+- Madrid (`circuit_key=153`) has no MultiViewer geometry yet
+- Replay bundles are not committed to git — rebuild per session after clone
+- Estimated lap in strategy panel is approximate (±1 lap) from median lap time
 
 ---
 
