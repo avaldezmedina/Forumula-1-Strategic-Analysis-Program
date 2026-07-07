@@ -80,3 +80,37 @@ export interface ActiveFlagState {
   sector?: number;
   message: string;
 }
+
+export interface StintAnalysis {
+  stint_number: number;
+  compound: string;
+  lap_start: number;
+  lap_end: number;
+  clean_lap_count: number;
+  avg_clean_lap_time_seconds: number;
+  degradation_seconds_per_lap: number;
+}
+
+export interface LapScore {
+  lap_number: number;
+  stint_number: number;
+  compound: string;
+  current_tyre_age_laps: number;
+  current_avg_clean_lap_time_seconds: number | null;
+  current_degradation_seconds_per_lap: number;
+  expected_laps_before_significant_deg: number;
+  estimated_laps_remaining: number;
+  recommendation: string;
+  tire_life_ratio: number;
+}
+
+export interface DriverPanel {
+  session_key: number;
+  driver_number: number;
+  driver_name: string;
+  team_name: string | null;
+  team_color: string | null;
+  estimated_lap_duration_ms: number | null;
+  stints: StintAnalysis[];
+  scores: LapScore[];
+}

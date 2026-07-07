@@ -5,6 +5,7 @@ import {
   fetchReplayMetadata,
   fetchReplayTrack,
 } from "../api";
+import { DriverStrategyPanel } from "../components/DriverStrategyPanel";
 import { EventOverlay } from "../components/EventOverlay";
 import { Leaderboard } from "../components/Leaderboard";
 import { SpeedControl } from "../components/SpeedControl";
@@ -24,6 +25,7 @@ export function ReplayViewer() {
   const [events, setEvents] = useState<ReplayEvent[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [selectedDriver, setSelectedDriver] = useState<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -119,11 +121,28 @@ export function ReplayViewer() {
             cars={playback.cars}
             drivers={metadata.drivers}
             activeFlags={activeFlags}
+            selectedDriver={selectedDriver}
+            onSelectDriver={(n) => setSelectedDriver(n === selectedDriver ? null : n)}
           />
           <EventOverlay activeFlags={activeFlags} incidents={incidents} />
           {framesLoading && <div className="loading-badge">Loading frames...</div>}
         </div>
-        <Leaderboard cars={playback.cars} drivers={metadata.drivers} />
+        <div className="sidebar">
+          <Leaderboard
+            cars={playback.cars}
+            drivers={metadata.drivers}
+            selectedDriver={selectedDriver}
+            onSelectDriver={(n) => setSelectedDriver(n === selectedDriver ? null : n)}
+          />
+          {selectedDriver != null && (
+            <DriverStrategyPanel
+              sessionKey={numericSessionKey}
+              driverNumber={selectedDriver}
+              currentMs={playback.currentMs}
+              onClose={() => setSelectedDriver(null)}
+            />
+          )}
+        </div>
       </div>
 
       <Timeline

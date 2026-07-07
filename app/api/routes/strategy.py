@@ -214,6 +214,140 @@ def get_recommendation(
     )
 
 
+class LapScore(BaseModel):
+    lap_number: int
+    stint_number: int
+    compound: str
+    current_tyre_age_laps: int
+    current_avg_clean_lap_time_seconds: Optional[float]
+    current_degradation_seconds_per_lap: float
+    expected_laps_before_significant_deg: float
+    estimated_laps_remaining: float
+    recommendation: str
+    tire_life_ratio: float
+
+
+class DriverPanel(BaseModel):
+    session_key: int
+    driver_number: int
+    driver_name: str
+    team_name: Optional[str]
+    team_color: Optional[str]
+    estimated_lap_duration_ms: Optional[int]
+    stints: list[StintAnalysis]
+    scores: list[LapScore]
+
+
+TEAM_COLORS: dict[str, str] = {
+    "Red Bull Racing": "#3671C6",
+    "Mercedes": "#27F4D2",
+    "Ferrari": "#E8002D",
+    "McLaren": "#FF8000",
+    "Aston Martin": "#229971",
+    "Alpine": "#FF87BC",
+    "Williams": "#64C4FF",
+    "RB": "#6692FF",
+    "Visa Cash App RB": "#6692FF",
+    "Kick Sauber": "#52E252",
+    "Stake F1 Team Kick Sauber": "#52E252",
+    "Haas F1 Team": "#B6BABD",
+}
+
+
+@router.get("/driver-panel/{session_key}/{driver_number}", response_model=DriverPanel)
+def get_driver_panel(
+    session_key: int,
+    driver_number: int,
+    db: Session = Depends(get_db),
+):
+    """
+    Return all precomputed strategy data for a driver in one payload.
+
+    Used by the replay viewer to populate the live driver strategy panel.
+    Returns all per-lap pit-window scores, all stint summaries, and an
+    estimated lap duration derived from the driver's clean lap times.
+    """
+    stints = (
+        db.query(models.StintPaceSummary)
+        .filter(
+            models.StintPaceSummary.session_key == session_key,
+            models.StintPaceSummary.driver_number == driver_number,
+        )
+        .order_by(models.StintPaceSummary.stint_number)
+        .all()
+    )
+
+    scores_raw = (
+        db.query(models.PitWindowScore)
+        .filter(
+            models.PitWindowScore.session_key == session_key,
+            models.PitWindowScore.driver_number == driver_number,
+        )
+        .order_by(models.PitWindowScore.lap_number)
+        .all()
+    )
+
+    driver = (
+        db.query(models.Driver)
+        .join(models.Session, models.Session.session_key == session_key)
+        .join(models.Meeting, models.Meeting.meeting_key == models.Session.meeting_key)
+        .filter(
+            models.Driver.year == models.Meeting.year,
+            models.Driver.driver_number == driver_number,
+        )
+        .first()
+    )
+
+    # Derive estimated lap duration from clean stint laps (median avg lap time).
+    estimated_lap_duration_ms: Optional[int] = None
+    if stints:
+        clean_times = [
+            float(s.avg_clean_lap_time_seconds)
+            for s in stints
+            if s.avg_clean_lap_time_seconds is not None
+            and 45.0 <= float(s.avg_clean_lap_time_seconds) <= 200.0
+        ]
+        if clean_times:
+            clean_times.sort()
+            mid = len(clean_times) // 2
+            median_s = clean_times[mid] if len(clean_times) % 2 else (clean_times[mid - 1] + clean_times[mid]) / 2.0
+            estimated_lap_duration_ms = int(median_s * 1000)
+
+    team_name = driver.team_name if driver else None
+    first = driver.first_name or "" if driver else ""
+    last = driver.last_name or "" if driver else ""
+    driver_name = f"{first} {last}".strip() or f"Driver {driver_number}"
+    team_color = TEAM_COLORS.get(team_name or "", "#FFFFFF") if team_name else "#FFFFFF"
+
+    def _lap_score(score: models.PitWindowScore) -> LapScore:
+        expected = _to_float(score.expected_laps_before_significant_deg) or 0.0
+        age = score.current_tyre_age_laps
+        ratio = (age / expected) if expected > 0 else 0.0
+        return LapScore(
+            lap_number=score.lap_number,
+            stint_number=score.stint_number,
+            compound=score.compound,
+            current_tyre_age_laps=age,
+            current_avg_clean_lap_time_seconds=_to_float(score.current_avg_clean_lap_time_seconds),
+            current_degradation_seconds_per_lap=_to_float(score.current_degradation_seconds_per_lap),
+            expected_laps_before_significant_deg=expected,
+            estimated_laps_remaining=_to_float(score.estimated_laps_remaining),
+            recommendation=score.recommendation,
+            tire_life_ratio=round(ratio, 3),
+        )
+
+    return DriverPanel(
+        session_key=session_key,
+        driver_number=driver_number,
+        driver_name=driver_name,
+        team_name=team_name,
+        team_color=team_color,
+        estimated_lap_duration_ms=estimated_lap_duration_ms,
+        stints=[_build_stint_analysis(s) for s in stints],
+        scores=[_lap_score(s) for s in scores_raw],
+    )
+
+
 @router.get(
     "/stint-summary/{session_key}/{driver_number}",
     response_model=list[StintAnalysis],

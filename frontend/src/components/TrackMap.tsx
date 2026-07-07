@@ -6,6 +6,8 @@ interface TrackMapProps {
   cars: InterpolatedCar[];
   drivers: ReplayDriver[];
   activeFlags: ActiveFlagState[];
+  selectedDriver?: number | null;
+  onSelectDriver?: (driverNumber: number) => void;
 }
 
 function pointsToPath(points: TrackPoint[]): string {
@@ -30,7 +32,7 @@ const TRACK_STROKE = 0.010;
 const SECTOR_STROKE = 0.016;
 const FONT_SIZE = 0.014;
 
-export function TrackMap({ track, cars, drivers, activeFlags }: TrackMapProps) {
+export function TrackMap({ track, cars, drivers, activeFlags, selectedDriver, onSelectDriver }: TrackMapProps) {
   const driverMap = new Map(drivers.map((d) => [d.driver_number, d]));
   const trackPath = pointsToPath(track.points);
 
@@ -79,14 +81,30 @@ export function TrackMap({ track, cars, drivers, activeFlags }: TrackMapProps) {
       {cars.map((car) => {
         const driver = driverMap.get(car.driverNumber);
         const color = driver?.team_color ?? "#ffffff";
+        const isSelected = selectedDriver === car.driverNumber;
         return (
-          <g key={car.driverNumber}>
+          <g
+            key={car.driverNumber}
+            onClick={() => onSelectDriver?.(car.driverNumber)}
+            style={{ cursor: onSelectDriver ? "pointer" : "default" }}
+          >
+            {isSelected && (
+              <circle
+                cx={car.x}
+                cy={car.y}
+                r={CAR_RADIUS * 1.7}
+                fill="none"
+                stroke="#fff"
+                strokeWidth={CAR_RADIUS * 0.25}
+                opacity={0.85}
+              />
+            )}
             <circle
               cx={car.x}
               cy={car.y}
               r={CAR_RADIUS}
               fill={color}
-              stroke="#000"
+              stroke={isSelected ? "#fff" : "#000"}
               strokeWidth={CAR_RADIUS * 0.2}
             />
             <text

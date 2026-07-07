@@ -4,14 +4,19 @@ import type { ReplayDriver } from "../types";
 interface LeaderboardProps {
   cars: InterpolatedCar[];
   drivers: ReplayDriver[];
+  selectedDriver?: number | null;
+  onSelectDriver?: (driverNumber: number) => void;
 }
 
-export function Leaderboard({ cars, drivers }: LeaderboardProps) {
+export function Leaderboard({ cars, drivers, selectedDriver, onSelectDriver }: LeaderboardProps) {
   const driverMap = new Map(drivers.map((driver) => [driver.driver_number, driver]));
 
   return (
     <div className="leaderboard">
       <h3>Leaderboard</h3>
+      {onSelectDriver && (
+        <p className="leaderboard-hint">Click a driver to see strategy</p>
+      )}
       <table>
         <thead>
           <tr>
@@ -23,8 +28,13 @@ export function Leaderboard({ cars, drivers }: LeaderboardProps) {
         <tbody>
           {cars.map((car) => {
             const driver = driverMap.get(car.driverNumber);
+            const isSelected = selectedDriver === car.driverNumber;
             return (
-              <tr key={car.driverNumber}>
+              <tr
+                key={car.driverNumber}
+                onClick={() => onSelectDriver?.(car.driverNumber)}
+                className={isSelected ? "lb-row lb-row-selected" : "lb-row"}
+              >
                 <td>{car.position ?? "-"}</td>
                 <td>
                   <span

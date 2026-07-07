@@ -1,4 +1,5 @@
 import type {
+  DriverPanel,
   ReplayEvent,
   ReplayFrame,
   ReplayMetadata,
@@ -55,6 +56,14 @@ export async function fetchReplayFrames(
   }
   const payload = await response.json();
   return payload.frames;
+}
+
+export async function fetchDriverPanel(sessionKey: number, driverNumber: number): Promise<DriverPanel> {
+  const response = await fetch(`${API_BASE}/strategy/driver-panel/${sessionKey}/${driverNumber}`);
+  if (!response.ok) {
+    throw new Error(`Strategy data not available for driver ${driverNumber}`);
+  }
+  return response.json();
 }
 
 export async function queueReplayBuild(sessionKey: number, force = false): Promise<void> {
